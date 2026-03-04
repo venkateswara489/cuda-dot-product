@@ -6,10 +6,11 @@
 
 #define N 100000000
 #define THREADS 256
-#define BLOCKS 256
+#define BLOCKS 2048   // Increased for better GPU utilization
 
-// CUDA Kernel
-__global__ void dotProductKernel(double* A, double* B, double* partial, int n)
+// ================= CUDA KERNEL =================
+__global__ void dotProductKernel(double* A, double* B,
+                                 double* partial, int n)
 {
     __shared__ double cache[THREADS];
 
@@ -17,26 +18,25 @@ __global__ void dotProductKernel(double* A, double* B, double* partial, int n)
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    double temp = 0.0;
+    double localSum = 0.0;
 
+    // Grid-stride loop
     while (gid < n)
     {
-        temp += A[gid] * B[gid];
+        localSum += A[gid] * B[gid];
         gid += stride;
     }
 
-    cache[tid] = temp;
+    cache[tid] = localSum;
     __syncthreads();
 
-    int i = blockDim.x / 2;
-
-    while (i != 0)
+    // Block reduction
+    for (int s = blockDim.x / 2; s > 0; s >>= 1)
     {
-        if (tid < i)
-            cache[tid] += cache[tid + i];
+        if (tid < s)
+            cache[tid] += cache[tid + s];
 
         __syncthreads();
-        i /= 2;
     }
 
     if (tid == 0)
@@ -44,7 +44,7 @@ __global__ void dotProductKernel(double* A, double* B, double* partial, int n)
 }
 
 
-// OpenMP Version
+// ================= OPENMP VERSION =================
 double dotProductOMP(double* A, double* B)
 {
     double sum = 0.0;
@@ -57,11 +57,10 @@ double dotProductOMP(double* A, double* B)
 }
 
 
-// CUDA Version
-double dotProductCUDA(double* A, double* B)
+// ================= CUDA VERSION =================
+double dotProductCUDA(double* A, double* B, float &kernelTimeMs)
 {
     double *d_A, *d_B, *d_partial;
-
     double* h_partial = new double[BLOCKS];
 
     cudaMalloc(&d_A, N * sizeof(double));
@@ -82,32 +81,36 @@ double dotProductCUDA(double* A, double* B)
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
 
-    float kernelTime = 0;
-    cudaEventElapsedTime(&kernelTime, start, stop);
+    cudaEventElapsedTime(&kernelTimeMs, start, stop);
 
-    cudaMemcpy(h_partial, d_partial, BLOCKS * sizeof(double),
+    cudaMemcpy(h_partial, d_partial,
+               BLOCKS * sizeof(double),
                cudaMemcpyDeviceToHost);
 
     double sum = 0.0;
-
     for (int i = 0; i < BLOCKS; i++)
         sum += h_partial[i];
-
-    std::cout << "Kernel Time (ms): " << kernelTime << std::endl;
 
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_partial);
-
     delete[] h_partial;
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     return sum;
 }
 
 
-// MAIN PROGRAM
+// ================= MAIN =================
 int main()
 {
+    // Print GPU name
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    std::cout << "GPU: " << prop.name << std::endl;
+
     std::cout << "Generating vectors..." << std::endl;
 
     double* A = new double[N];
@@ -122,29 +125,34 @@ int main()
         B[i] = dist(rng);
     }
 
+    // -------- CPU Timing --------
     auto t0 = std::chrono::high_resolution_clock::now();
-
     double cpuResult = dotProductOMP(A, B);
-
     auto t1 = std::chrono::high_resolution_clock::now();
 
+    // -------- GPU Timing --------
     auto t2 = std::chrono::high_resolution_clock::now();
-
-    double gpuResult = dotProductCUDA(A, B);
-
+    float kernelTime = 0.0f;
+    double gpuResult = dotProductCUDA(A, B, kernelTime);
     auto t3 = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> cpuTime = t1 - t0;
     std::chrono::duration<double> gpuTime = t3 - t2;
 
-    std::cout << "CPU Result: " << cpuResult << std::endl;
+    // -------- Output --------
+    std::cout << "\nCPU Result: " << cpuResult << std::endl;
     std::cout << "GPU Result: " << gpuResult << std::endl;
 
-    std::cout << "CPU Time: " << cpuTime.count() << " seconds" << std::endl;
-    std::cout << "GPU Time: " << gpuTime.count() << " seconds" << std::endl;
+    std::cout << "\nCPU Time: " << cpuTime.count() << " seconds" << std::endl;
+    std::cout << "GPU Total Time: " << gpuTime.count() << " seconds" << std::endl;
+    std::cout << "GPU Kernel Time: " << kernelTime << " ms" << std::endl;
 
-    std::cout << "Speedup: "
+    std::cout << "\nTotal Speedup (CPU/GPU): "
               << cpuTime.count() / gpuTime.count()
+              << std::endl;
+
+    std::cout << "Kernel Speedup (CPU/kernel): "
+              << (cpuTime.count() * 1000.0) / kernelTime
               << std::endl;
 
     delete[] A;
