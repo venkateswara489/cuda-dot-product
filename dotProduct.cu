@@ -151,10 +151,6 @@ int main()
               << cpuTime.count() / gpuTime.count()
               << std::endl;
 
-    std::cout << "Kernel Speedup (CPU/kernel): "
-              << (cpuTime.count() * 1000.0) / kernelTime
-              << std::endl;
-
     delete[] A;
     delete[] B;
 
